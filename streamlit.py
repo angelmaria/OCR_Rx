@@ -11,7 +11,82 @@ import pandas as pd
 import io
 import fitz  # PyMuPDF
 from pathlib import Path
-from pharma_dictionary import PharmaDictionary
+import os
+import platform
+
+# ============================================================================
+# CONFIGURACIÓN TESSERACT
+# ============================================================================
+
+def configurar_tesseract():
+    """Configura automáticamente la ruta de Tesseract según el sistema operativo"""
+    
+    # Si ya está configurado manualmente, respetarlo
+    if pytesseract.pytesseract.tesseract_cmd and os.path.exists(pytesseract.pytesseract.tesseract_cmd):
+        return True
+    
+    sistema = platform.system()
+    
+    if sistema == "Windows":
+        # Rutas comunes en Windows (ORDEN IMPORTANTE: específicas primero)
+        posibles_rutas = [
+            # TU RUTA ESPECÍFICA
+            r"C:\Users\angel.martinez\AppData\Local\Programs\Tesseract-OCR\tesseract.exe",
+            # Rutas estándar
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        ]
+        
+        for ruta in posibles_rutas:
+            if os.path.exists(ruta):
+                pytesseract.pytesseract.tesseract_cmd = ruta
+                print(f"✅ Tesseract encontrado en: {ruta}")
+                return True
+        
+        print("❌ Tesseract no encontrado en rutas predefinidas")
+        return False
+    
+    elif sistema == "Darwin":  # macOS
+        # En Mac con Homebrew, tesseract suele estar en PATH
+        try:
+            import subprocess
+            result = subprocess.run(['which', 'tesseract'], capture_output=True, text=True)
+            if result.returncode == 0:
+                ruta = result.stdout.strip()
+                pytesseract.pytesseract.tesseract_cmd = ruta
+                print(f"✅ Tesseract encontrado en: {ruta}")
+                return True
+        except:
+            pass
+        
+        # Rutas comunes en Mac
+        posibles_rutas = [
+            "/opt/homebrew/bin/tesseract",  # Apple Silicon (M1/M2/M3)
+            "/usr/local/bin/tesseract",     # Intel Mac
+        ]
+        
+        for ruta in posibles_rutas:
+            if os.path.exists(ruta):
+                pytesseract.pytesseract.tesseract_cmd = ruta
+                print(f"✅ Tesseract encontrado en: {ruta}")
+                return True
+        
+        print("❌ Tesseract no encontrado. Instala con: brew install tesseract")
+        return False
+    
+    else:  # Linux
+        # En Linux suele estar en PATH
+        try:
+            import subprocess
+            result = subprocess.run(['which', 'tesseract'], capture_output=True, text=True)
+            if result.returncode == 0:
+                return True
+        except:
+            pass
+        return True
+
+# Intentar configurar Tesseract al inicio
+TESSERACT_DISPONIBLE = configurar_tesseract()
 
 # ============================================================================
 # CONFIGURACIÓN INICIAL
@@ -274,17 +349,34 @@ class TesseractOCR(OCREngine):
     
     @staticmethod
     def process(image, doc_type):
+        # Verificar si Tesseract está disponible
+        if not TESSERACT_DISPONIBLE:
+            raise Exception(
+                "Tesseract no está instalado o no se encuentra en el sistema.\n\n"
+                "Soluciones:\n"
+                "- Windows: Descarga desde https://github.com/UB-Mannheim/tesseract/wiki\n"
+                "- Mac: brew install tesseract\n"
+                "- Linux: sudo apt-get install tesseract-ocr\n\n"
+                "O usa EasyOCR en su lugar (selecciona en el menú lateral)."
+            )
+        
         processed = OCREngine.preprocess_image(image, doc_type)
         
         # Configuración optimizada para español médico
         custom_config = r'--oem 3 --psm 6 -l spa'
         
-        text = pytesseract.image_to_string(processed, config=custom_config)
+        try:
+            text = pytesseract.image_to_string(processed, config=custom_config)
+        except pytesseract.pytesseract.TesseractNotFoundError:
+            raise Exception("Error al ejecutar Tesseract. Verifica la instalación.")
         
         # Calcular confianza aproximada
-        data = pytesseract.image_to_data(processed, config=custom_config, output_type=pytesseract.Output.DICT)
-        confidences = [int(conf) for conf in data['conf'] if conf != '-1']
-        avg_confidence = np.mean(confidences) / 100 if confidences else 0.5
+        try:
+            data = pytesseract.image_to_data(processed, config=custom_config, output_type=pytesseract.Output.DICT)
+            confidences = [int(conf) for conf in data['conf'] if conf != '-1']
+            avg_confidence = np.mean(confidences) / 100 if confidences else 0.5
+        except:
+            avg_confidence = 0.5
         
         return text, avg_confidence
 
@@ -602,6 +694,11 @@ def main():
     if 'extractor' not in st.session_state:
         st.session_state.extractor = DataExtractor(st.session_state.db)
     
+    # Inicializar diccionario farmacéutico
+    if 'pharma_dict' not in st.session_state:
+        from pharma_dictionary import PharmaDictionary
+        st.session_state.pharma_dict = PharmaDictionary()
+    
     # Header
     st.markdown('<p class="main-header">🏥 Sistema OCR - Fórmulas Magistrales</p>', unsafe_allow_html=True)
     st.markdown("**Sistema inteligente con aprendizaje continuo para normalización de recetas**")
@@ -610,12 +707,55 @@ def main():
     with st.sidebar:
         st.header("⚙️ Configuración")
         
+        # ADVERTENCIA: Tesseract no disponible
+        if not TESSERACT_DISPONIBLE:
+            st.error("⚠️ **Tesseract no encontrado**")
+            
+            sistema = platform.system()
+            if sistema == "Windows":
+                st.markdown("""
+                **Para Windows:**
+                1. [Descargar instalador](https://github.com/UB-Mannheim/tesseract/wiki)
+                2. Instalar en la ruta por defecto
+                3. Reiniciar Streamlit
+                
+                **O usa EasyOCR** (más abajo)
+                """)
+            elif sistema == "Darwin":
+                st.markdown("""
+                **Para Mac:**
+                ```bash
+                brew install tesseract
+                brew install tesseract-lang
+                ```
+                Luego reinicia Streamlit
+                """)
+            
+            st.markdown("---")
+        else:
+            st.success(f"✅ Tesseract disponible")
+            if pytesseract.pytesseract.tesseract_cmd:
+                st.caption(f"📍 Ruta: {pytesseract.pytesseract.tesseract_cmd}")
+        
         # Selector de motor OCR
         st.subheader("Motor OCR")
         
+        # Filtrar opciones según disponibilidad de Tesseract
+        opciones_disponibles = ["EasyOCR (manuscrita)"]
+        
+        if TESSERACT_DISPONIBLE:
+            opciones_disponibles = [
+                "Automático (recomendado)", 
+                "Tesseract (digital)", 
+                "EasyOCR (manuscrita)", 
+                "Azure Vision (premium)"
+            ]
+        else:
+            opciones_disponibles.append("Azure Vision (premium)")
+        
         ocr_engine = st.radio(
             "Selecciona motor:",
-            ["Automático (recomendado)", "Tesseract (digital)", "EasyOCR (manuscrita)", "Azure Vision (premium)"],
+            opciones_disponibles,
             help="El modo automático detecta el tipo de documento y elige el mejor motor"
         )
         
@@ -735,13 +875,20 @@ def main():
                                 # Seleccionar motor OCR
                                 if "Automático" in ocr_engine:
                                     if doc_type == "digital":
-                                        engine_used = "Tesseract"
-                                        extracted_text, confidence = TesseractOCR.process(image, doc_type)
+                                        if TESSERACT_DISPONIBLE:
+                                            engine_used = "Tesseract"
+                                            extracted_text, confidence = TesseractOCR.process(image, doc_type)
+                                        else:
+                                            engine_used = "EasyOCR (Tesseract no disponible)"
+                                            extracted_text, confidence = EasyOCR_Engine.process(image, doc_type)
                                     else:
                                         engine_used = "EasyOCR"
                                         extracted_text, confidence = EasyOCR_Engine.process(image, doc_type)
                                 
                                 elif "Tesseract" in ocr_engine:
+                                    if not TESSERACT_DISPONIBLE:
+                                        st.error("❌ Tesseract no está disponible. Usa EasyOCR.")
+                                        return
                                     engine_used = "Tesseract"
                                     extracted_text, confidence = TesseractOCR.process(image, doc_type)
                                 
@@ -769,6 +916,27 @@ def main():
                             
                             with st.expander("📝 Ver texto extraído", expanded=True):
                                 st.text_area("Texto OCR", extracted_text, height=250, key="ocr_text_display")
+                            
+                            # NOVEDAD: Expandir abreviaturas automáticamente
+                            st.markdown("---")
+                            st.subheader("📖 Abreviaturas Detectadas")
+                            
+                            texto_expandido, abreviaturas_encontradas = st.session_state.pharma_dict.expandir_abreviaturas(extracted_text)
+                            
+                            if abreviaturas_encontradas:
+                                st.success(f"✅ {len(abreviaturas_encontradas)} abreviaturas detectadas")
+                                
+                                for abrev in abreviaturas_encontradas:
+                                    with st.expander(f"**{abrev['abreviatura']}** → {abrev['nombre_completo']}", expanded=False):
+                                        st.markdown(f"""
+                                        **Categoría:** {abrev['categoria'].replace('_', ' ').title()}  
+                                        **Descripción:** {abrev['descripcion']}
+                                        """)
+                                
+                                # Guardar texto expandido
+                                st.session_state.texto_expandido = texto_expandido
+                            else:
+                                st.info("ℹ️ No se detectaron abreviaturas comunes")
                             
                             # Extraer datos estructurados
                             st.markdown("---")
@@ -816,13 +984,53 @@ def main():
             if datos.get('medicamentos'):
                 st.subheader("💊 Medicamentos")
                 for i, med in enumerate(datos['medicamentos']):
-                    col1, col2 = st.columns([3, 1])
+                    col1, col2, col3 = st.columns([2, 1, 1])
                     with col1:
                         aprendido = " 🧠" if med.get('aprendido') else ""
                         st.info(f"**{med['nombre']}** - Dosis: {med['dosis']}{aprendido}")
                     with col2:
                         if med.get('aprendido'):
                             st.caption("Corregido automáticamente")
+                    with col3:
+                        # NOVEDAD: Botón de info del medicamento
+                        if st.button("ℹ️ Info", key=f"info_med_{i}"):
+                            info_med = st.session_state.pharma_dict.obtener_info_principio_activo(med['nombre'])
+                            if info_med:
+                                st.session_state[f'show_info_{i}'] = True
+                    
+                    # Mostrar información adicional si se solicitó
+                    if st.session_state.get(f'show_info_{i}'):
+                        with st.container():
+                            st.markdown(f"""
+                            **📋 Información de {info_med['nombre_generico']}**
+                            - **Categoría:** {info_med['categoria'].replace('_', ' ').title()}
+                            - **Indicaciones:** {', '.join(info_med['indicaciones'])}
+                            - **Dosis habituales:** {', '.join(info_med['dosis_habituales'])}
+                            - **Formas farmacéuticas:** {', '.join(info_med['formas_farmaceuticas'])}
+                            """)
+                            if info_med['incompatibilidades']:
+                                st.warning(f"⚠️ Incompatibilidades: {', '.join(info_med['incompatibilidades'])}")
+                
+                # NOVEDAD: Verificar incompatibilidades entre medicamentos
+                st.markdown("---")
+                st.subheader("🔍 Verificación de Compatibilidad")
+                
+                medicamentos_nombres = [med['nombre'] for med in datos['medicamentos']]
+                incompatibilidades = []
+                
+                for med_nombre in medicamentos_nombres:
+                    info = st.session_state.pharma_dict.obtener_info_principio_activo(med_nombre)
+                    if info and info['incompatibilidades']:
+                        for otro_med in medicamentos_nombres:
+                            if otro_med != med_nombre and otro_med.lower() in [inc.lower() for inc in info['incompatibilidades']]:
+                                incompatibilidades.append((med_nombre, otro_med))
+                
+                if incompatibilidades:
+                    st.error("🚨 ADVERTENCIA: Incompatibilidades detectadas")
+                    for med1, med2 in incompatibilidades:
+                        st.warning(f"⚠️ {med1} + {med2}")
+                else:
+                    st.success("✅ No se detectaron incompatibilidades conocidas")
             
             # Forma farmacéutica
             if datos.get('forma_farmaceutica'):
@@ -1052,102 +1260,333 @@ def main():
     # TAB 3: HISTORIAL
     # ========================================================================
     with tab3:
-        st.header("📈 Historial de Recetas")
+        st.header("📈 Historial y Diccionario")
         
-        # Obtener todas las recetas de la BD
-        conn = sqlite3.connect(st.session_state.db.db_path)
+        # Sub-tabs
+        subtab1, subtab2, subtab3 = st.tabs(["📋 Recetas", "📖 Diccionario", "📊 Estadísticas"])
         
-        query = """
-        SELECT 
-            id,
-            fecha_proceso,
-            tipo_receta,
-            ocr_engine,
-            validado,
-            confianza
-        FROM recetas
-        ORDER BY fecha_proceso DESC
-        LIMIT 50
-        """
+        # SUBTAB 1: Historial de recetas (código existente)
+        with subtab1:
+            st.subheader("Historial de Recetas Procesadas")
+            
+            # Obtener todas las recetas de la BD
+            conn = sqlite3.connect(st.session_state.db.db_path)
+            
+            query = """
+            SELECT 
+                id,
+                fecha_proceso,
+                tipo_receta,
+                ocr_engine,
+                validado,
+                confianza
+            FROM recetas
+            ORDER BY fecha_proceso DESC
+            LIMIT 50
+            """
+            
+            df_recetas = pd.read_sql_query(query, conn)
+            conn.close()
+            
+            if len(df_recetas) == 0:
+                st.info("📭 No hay recetas procesadas aún")
+            else:
+                # Métricas generales
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    st.metric("Total Recetas", len(df_recetas))
+                with col2:
+                    validadas = df_recetas['validado'].sum()
+                    st.metric("Validadas", f"{validadas} ({validadas/len(df_recetas)*100:.0f}%)")
+                with col3:
+                    avg_conf = df_recetas['confianza'].mean() * 100
+                    st.metric("Confianza Promedio", f"{avg_conf:.1f}%")
+                with col4:
+                    manuscritas = (df_recetas['tipo_receta'] == 'manuscrita').sum()
+                    st.metric("Manuscritas", manuscritas)
+                
+                st.markdown("---")
+                
+                # Filtros
+                col1, col2 = st.columns(2)
+                with col1:
+                    filtro_tipo = st.multiselect(
+                        "Filtrar por tipo",
+                        options=df_recetas['tipo_receta'].unique().tolist(),
+                        default=df_recetas['tipo_receta'].unique().tolist()
+                    )
+                with col2:
+                    filtro_validado = st.selectbox(
+                        "Estado validación",
+                        ["Todas", "Validadas", "Sin validar"]
+                    )
+                
+                # Aplicar filtros
+                df_filtrado = df_recetas[df_recetas['tipo_receta'].isin(filtro_tipo)]
+                
+                if filtro_validado == "Validadas":
+                    df_filtrado = df_filtrado[df_filtrado['validado'] == 1]
+                elif filtro_validado == "Sin validar":
+                    df_filtrado = df_filtrado[df_filtrado['validado'] == 0]
+                
+                # Formatear para visualización
+                df_display = df_filtrado.copy()
+                df_display['fecha_proceso'] = pd.to_datetime(df_display['fecha_proceso']).dt.strftime('%Y-%m-%d %H:%M')
+                df_display['validado'] = df_display['validado'].map({1: '✅', 0: '⏳'})
+                df_display['confianza'] = (df_display['confianza'] * 100).round(1).astype(str) + '%'
+                
+                df_display.columns = ['ID', 'Fecha', 'Tipo', 'Motor OCR', 'Validado', 'Confianza']
+                
+                # Mostrar tabla
+                st.dataframe(
+                    df_display,
+                    use_container_width=True,
+                    hide_index=True
+                )
+                
+                # Gráficos
+                st.markdown("---")
+                st.subheader("📊 Análisis Temporal")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # Distribución por tipo
+                    tipo_counts = df_recetas['tipo_receta'].value_counts()
+                    st.bar_chart(tipo_counts, use_container_width=True)
+                    st.caption("Distribución por tipo de receta")
+                
+                with col2:
+                    # Evolución de confianza
+                    df_recetas['fecha'] = pd.to_datetime(df_recetas['fecha_proceso']).dt.date
+                    conf_by_date = df_recetas.groupby('fecha')['confianza'].mean() * 100
+                    st.line_chart(conf_by_date, use_container_width=True)
+                    st.caption("Evolución de confianza promedio")
         
-        df_recetas = pd.read_sql_query(query, conn)
-        conn.close()
+        # SUBTAB 2: DICCIONARIO FARMACÉUTICO
+        with subtab2:
+            st.subheader("📖 Diccionario Farmacéutico")
+            
+            # Estadísticas del diccionario
+            dict_stats = st.session_state.pharma_dict.obtener_estadisticas()
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Abreviaturas", dict_stats['total_abreviaturas'])
+            with col2:
+                st.metric("Principios Activos", dict_stats['total_principios_activos'])
+            with col3:
+                st.metric("Variantes Ortográficas", dict_stats['total_variantes'])
+            
+            st.markdown("---")
+            
+            # Abreviaturas más usadas
+            st.subheader("🔥 Términos Más Usados")
+            
+            if dict_stats['mas_usadas']:
+                df_top = pd.DataFrame(dict_stats['mas_usadas'])
+                
+                # Mostrar en tabla bonita
+                for idx, row in df_top.iterrows():
+                    with st.expander(f"**{row['abrev']}** - {row['nombre']} ({row['usos']} usos)"):
+                        # Buscar info completa
+                        conn = sqlite3.connect(st.session_state.pharma_dict.db_path)
+                        cursor = conn.cursor()
+                        cursor.execute("""
+                            SELECT categoria, descripcion, uso_comun
+                            FROM abreviaturas
+                            WHERE abreviatura = ?
+                        """, (row['abrev'],))
+                        info = cursor.fetchone()
+                        conn.close()
+                        
+                        if info:
+                            st.markdown(f"""
+                            **Categoría:** {info[0].replace('_', ' ').title()}  
+                            **Descripción:** {info[1]}  
+                            **Uso común:** {info[2]}
+                            """)
+            else:
+                st.info("ℹ️ Aún no se han usado términos del diccionario")
+            
+            st.markdown("---")
+            
+            # Agregar término personalizado
+            st.subheader("➕ Agregar Término Personalizado")
+            
+            with st.form("add_custom_term"):
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    nueva_abrev = st.text_input("Abreviatura *", placeholder="Ej: SOE")
+                    categoria = st.selectbox("Categoría *", [
+                        "excipiente",
+                        "via_administracion", 
+                        "frecuencia",
+                        "forma_farmaceutica",
+                        "instruccion",
+                        "conservante",
+                        "otro"
+                    ])
+                
+                with col2:
+                    nuevo_nombre = st.text_input("Nombre Completo *", placeholder="Ej: Sin Otra Especificación")
+                    uso_comun = st.text_input("Uso Común", placeholder="Dónde se usa normalmente")
+                
+                descripcion = st.text_area("Descripción", placeholder="Explica qué significa y para qué sirve")
+                
+                submitted = st.form_submit_button("💾 Guardar en Diccionario", use_container_width=True)
+                
+                if submitted:
+                    if nueva_abrev and nuevo_nombre:
+                        st.session_state.pharma_dict.agregar_termino_personalizado(
+                            nueva_abrev, nuevo_nombre, categoria, descripcion
+                        )
+                        st.success(f"✅ '{nueva_abrev}' agregado correctamente")
+                        st.balloons()
+                        st.rerun()
+                    else:
+                        st.error("❌ La abreviatura y el nombre completo son obligatorios")
+            
+            st.markdown("---")
+            
+            # Buscador de términos
+            st.subheader("🔍 Buscar en Diccionario")
+            
+            busqueda = st.text_input("Busca una abreviatura o término", placeholder="Ej: BID, minoxidil, CSP")
+            
+            if busqueda:
+                conn = sqlite3.connect(st.session_state.pharma_dict.db_path)
+                cursor = conn.cursor()
+                
+                # Buscar en abreviaturas
+                cursor.execute("""
+                    SELECT abreviatura, nombre_completo, categoria, descripcion
+                    FROM abreviaturas
+                    WHERE LOWER(abreviatura) LIKE ? OR LOWER(nombre_completo) LIKE ?
+                    LIMIT 10
+                """, (f"%{busqueda.lower()}%", f"%{busqueda.lower()}%"))
+                
+                resultados_abrev = cursor.fetchall()
+                
+                # Buscar en principios activos
+                cursor.execute("""
+                    SELECT nombre_generico, categoria, indicaciones
+                    FROM principios_activos
+                    WHERE LOWER(nombre_generico) LIKE ?
+                    LIMIT 10
+                """, (f"%{busqueda.lower()}%",))
+                
+                resultados_pa = cursor.fetchall()
+                conn.close()
+                
+                if resultados_abrev:
+                    st.success(f"✅ {len(resultados_abrev)} abreviaturas encontradas")
+                    for abrev, nombre, cat, desc in resultados_abrev:
+                        st.info(f"**{abrev}** → {nombre}")
+                        st.caption(f"Categoría: {cat} | {desc}")
+                        st.markdown("---")
+                
+                if resultados_pa:
+                    st.success(f"✅ {len(resultados_pa)} principios activos encontrados")
+                    for nombre, cat, ind_json in resultados_pa:
+                        indicaciones = json.loads(ind_json) if ind_json else []
+                        st.info(f"**{nombre}** ({cat})")
+                        if indicaciones:
+                            st.caption(f"Indicaciones: {', '.join(indicaciones)}")
+                        st.markdown("---")
+                
+                if not resultados_abrev and not resultados_pa:
+                    st.warning("⚠️ No se encontraron resultados")
         
-        if len(df_recetas) == 0:
-            st.info("📭 No hay recetas procesadas aún")
-        else:
-            # Métricas generales
+        # SUBTAB 3: ESTADÍSTICAS GLOBALES
+        with subtab3:
+            st.subheader("📊 Estadísticas del Sistema")
+            
+            # Combinar stats de OCR y Diccionario
+            ocr_stats = st.session_state.db.obtener_estadisticas()
+            dict_stats = st.session_state.pharma_dict.obtener_estadisticas()
+            
+            # Métricas principales
+            st.markdown("### 🎯 Rendimiento General")
+            
             col1, col2, col3, col4 = st.columns(4)
             
             with col1:
-                st.metric("Total Recetas", len(df_recetas))
+                st.metric(
+                    "Precisión OCR",
+                    f"{ocr_stats['confianza_promedio']}%",
+                    delta=None
+                )
+            
             with col2:
-                validadas = df_recetas['validado'].sum()
-                st.metric("Validadas", f"{validadas} ({validadas/len(df_recetas)*100:.0f}%)")
+                tasa_validacion = (ocr_stats['validadas'] / ocr_stats['total_recetas'] * 100) if ocr_stats['total_recetas'] > 0 else 0
+                st.metric(
+                    "Tasa Validación",
+                    f"{tasa_validacion:.1f}%"
+                )
+            
             with col3:
-                avg_conf = df_recetas['confianza'].mean() * 100
-                st.metric("Confianza Promedio", f"{avg_conf:.1f}%")
+                st.metric(
+                    "Correcciones Aprendidas",
+                    ocr_stats['correcciones']
+                )
+            
             with col4:
-                manuscritas = (df_recetas['tipo_receta'] == 'manuscrita').sum()
-                st.metric("Manuscritas", manuscritas)
+                st.metric(
+                    "Términos en Diccionario",
+                    dict_stats['total_abreviaturas']
+                )
             
             st.markdown("---")
             
-            # Filtros
-            col1, col2 = st.columns(2)
-            with col1:
-                filtro_tipo = st.multiselect(
-                    "Filtrar por tipo",
-                    options=df_recetas['tipo_receta'].unique().tolist(),
-                    default=df_recetas['tipo_receta'].unique().tolist()
-                )
-            with col2:
-                filtro_validado = st.selectbox(
-                    "Estado validación",
-                    ["Todas", "Validadas", "Sin validar"]
-                )
-            
-            # Aplicar filtros
-            df_filtrado = df_recetas[df_recetas['tipo_receta'].isin(filtro_tipo)]
-            
-            if filtro_validado == "Validadas":
-                df_filtrado = df_filtrado[df_filtrado['validado'] == 1]
-            elif filtro_validado == "Sin validar":
-                df_filtrado = df_filtrado[df_filtrado['validado'] == 0]
-            
-            # Formatear para visualización
-            df_display = df_filtrado.copy()
-            df_display['fecha_proceso'] = pd.to_datetime(df_display['fecha_proceso']).dt.strftime('%Y-%m-%d %H:%M')
-            df_display['validado'] = df_display['validado'].map({1: '✅', 0: '⏳'})
-            df_display['confianza'] = (df_display['confianza'] * 100).round(1).astype(str) + '%'
-            
-            df_display.columns = ['ID', 'Fecha', 'Tipo', 'Motor OCR', 'Validado', 'Confianza']
-            
-            # Mostrar tabla
-            st.dataframe(
-                df_display,
-                use_container_width=True,
-                hide_index=True
-            )
-            
-            # Gráficos
-            st.markdown("---")
-            st.subheader("📊 Análisis")
+            # Impacto del aprendizaje
+            st.markdown("### 🧠 Impacto del Aprendizaje")
             
             col1, col2 = st.columns(2)
             
             with col1:
-                # Distribución por tipo
-                tipo_counts = df_recetas['tipo_receta'].value_counts()
-                st.bar_chart(tipo_counts, use_container_width=True)
-                st.caption("Distribución por tipo de receta")
+                st.markdown("""
+                **Sistema de Correcciones:**
+                - Base de datos SQLite local
+                - Persistencia entre sesiones
+                - Mejora automática con uso
+                """)
+                
+                if ocr_stats['correcciones'] > 0:
+                    st.success(f"✅ {ocr_stats['correcciones']} correcciones guardadas")
+                    st.caption("El sistema aprende de cada validación manual")
+                else:
+                    st.info("ℹ️ Aún no hay correcciones. Valida recetas para entrenar el sistema.")
             
             with col2:
-                # Evolución de confianza
-                df_recetas['fecha'] = pd.to_datetime(df_recetas['fecha_proceso']).dt.date
-                conf_by_date = df_recetas.groupby('fecha')['confianza'].mean() * 100
-                st.line_chart(conf_by_date, use_container_width=True)
-                st.caption("Evolución de confianza promedio")
+                st.markdown("""
+                **Diccionario Farmacéutico:**
+                - Expansión automática de abreviaturas
+                - Detección de incompatibilidades
+                - Términos personalizables
+                """)
+                
+                if dict_stats['mas_usadas']:
+                    st.success(f"✅ {len(dict_stats['mas_usadas'])} términos activos")
+                    st.caption("Términos más usados disponibles en pestaña anterior")
+                else:
+                    st.info("ℹ️ Procesa recetas para activar el diccionario")
+            
+            st.markdown("---")
+            
+            # Recomendaciones
+            st.markdown("### 💡 Recomendaciones")
+            
+            if ocr_stats['total_recetas'] < 10:
+                st.warning("⚠️ Procesa al menos 10 recetas para obtener estadísticas significativas")
+            
+            if ocr_stats['validadas'] < ocr_stats['total_recetas'] * 0.5:
+                st.warning("⚠️ Valida más recetas para mejorar el aprendizaje del sistema")
+            
+            if dict_stats['total_abreviaturas'] < 30:
+                st.info("💡 Agrega términos personalizados de tu farmacia al diccionario")
 
 # ============================================================================
 # EJECUTAR APLICACIÓN
